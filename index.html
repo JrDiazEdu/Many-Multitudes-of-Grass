@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="US-en">
+<head>
+    <title>The Many Multitudes of Grass</title>
+    <style>
+        body, html { margin: 0; overflow: hidden; background: #222; width: 100%; height: 100%; }
+        canvas { display: block; width: 100%; height: 100%; }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+    <script type="module"> 
+        import * as glMatrix from 'https://cdn.jsdelivr.net/npm/gl-matrix@3.4.4/+esm';
+
+        const { vec3, mat4, quat, mat3 } = glMatrix;
+
+        const fragShaderSource =
+        `#version 300 es
+
+        precision mediump float;
+        out vec4 FragColor;
+
+        uniform vec4 uColor;
+        uniform vec3 uLightPosition;
+        uniform vec3 uLightColor;
+        uniform float uLightIntensity;
+
+        in vec3 vPosition;
+        in vec3 vNormal;
+
+        void main() 
+        {
+            vec3 lightDir = normalize(uLightPosition - vPosition);
+            float diffusion = max(dot(vNormal, lightDir), 0.0);
+
+            vec3 finalColor = uLightColor * uLightIntensity * diffusion * uColor.rgb;
+            FragColor = vec4(finalColor, 1.0);
+        }
+        `;
+
+        const texturedFragShaderSource =
+        `#version 300 es
+
+        precision mediump float;
+        in vec2 vTexCoord;
+        out vec4 FragColor;
+        uniform sampler2D uSampler;
+
+        void main() 
+        {
+            FragColor = texture(uSampler, vTexCoord);
+        }
+        `;
+
+        const vertShaderSource =
+        `#version 300 es
+
+        precision mediump float;
+
+        uniform mat4 uView;
+        uniform mat4 uProjection;
+
+        layout(location=0) in vec3 aPosition;
+        layout(location=1) in vec3 aInstanceOffset;
+        layout(location=2) in vec2 aTexCoord;
+
+        out vec2 vTexCoord;
+
+        void main()
+        {   
+            vTexCoord = aTexCoord;
+            gl_Position = uProjection * uView * vec4(aPosition, 1.0);
+        }
+        `;
+
+        const grassvertShaderSource =
+        `#version 300 es
+
+        precision mediump float;
+
+        uniform mat4 uView;
+        uniform mat4 uProjection;
+
+        layout(location=0) in vec3 aPosition;
+        layout(location=1) in vec3 aInstanceOffset;
+        layout(location=2) in vec3 aNormal;
+
+        out vec3 vPosition;
+        out vec3 vNormal;
+
+        void main()
+        {   
+            //AI GENERATED CODE BEGINS HERE/////////////////////////
+            vec4 worldPosition = uView * vec4(aPosition + aInstanceOffset, 1.0);
+            vPosition = worldPosition.xyz;
+            vNormal = normalize(mat3(uView) * aNormal);
+            //AI GENERATED CODE ENDS HERE///////////////////////////
+
+            vec4 grassPosition = vec4(vPosition, 1.0);
+
+            gl_Position = uProjection * worldPosition;
+        }
+        `;
+    
+        //Adapted from https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/
+        function quadraticBezier(p0, p1, p2, t) 
+        {
+            let a = vec3.lerp(vec3.create(), p0, p1, t);
+            let b = vec3.lerp(vec3.create(), p1, p2, t);
+            return vec3.lerp(vec3.create(), a, b, t);
+        }
+
+        const WindDirection = Math.PI / 4; // Example wind direction (45 degrees)
+        const WindStrength = 0.5; // Wind strength (0 to 1)
+        const WindSpeed = 0.2; // Wind speed over time
+        const partingDistance = 10.0;
+
+        // Generate the vertices for a grass blade using Bézier curves
+        function generateGrassPoints(p0, bladeHeight, movementDelta, time) 
+        {
+            //Wind implementation referenced from: https://gpuopen.com/learn/mesh_shaders/mesh_shaders-procedural_grass_rendering/
+            //AI GENERATED CODE SEGMENT BEGINS HERE /////////////////////////////////////////////////////////////////////////////////
+            const distanceToCamera = vec3.distance(cameraEyePos, p0); // Distance to camera
+            const bendStrength = Math.max(0, (partingDistance - distanceToCamera) / partingDistance); // Bend based on distance
+
+            const p1 = vec3.add(vec3.create(), p0, vec3.fromValues(0.0, bladeHeight, 0.0)); // Top of the blade
+            const p2 = vec3.add(vec3.create(), p1, vec3.scale(vec3.create(), bladeDirection, bladeHeight * bladeLeaning));
+
+            // Wind offset based on time and position
+            const t = time + (Math.cos(WindDirection) * p0[0] - Math.sin(WindDirection) * p0[2]) * WindSpeed;
+            const windOffsetX = WindStrength * Math.sin(0.5 * t); // Wind effect on X axis
+            const windOffsetZ = WindStrength * Math.sin(t); // Wind effect on Z axis
+
+            // Apply the wind offset to the blade points
+            const p1Wind = vec3.add(vec3.create(), p1, vec3.fromValues(windOffsetX, 0, windOffsetZ));
+            const p2Wind = vec3.add(vec3.create(), p2, vec3.fromValues(windOffsetX, 0, windOffsetZ));
+
+            // Adjust the lean direction
+            const leanDirection = vec3.fromValues(movementDelta[0], 0, movementDelta[2]);
+            vec3.normalize(leanDirection, leanDirection); // Normalize lean direction
+            const leanFactor = 0.2; // Lean strength
+            const leanAmount = vec3.scale(vec3.create(), leanDirection, bendStrength * leanFactor);
+
+            p1Wind[0] += leanAmount[0]; p1Wind[2] += leanAmount[2];
+            p2Wind[0] += leanAmount[0]; p2Wind[2] += leanAmount[2];
+
+            // Compute the tangents along the Bézier curve (at t=0 and t=1)
+            const T0 = vec3.sub(vec3.create(), p1Wind, p0);  // Tangent at t=0
+            const T1 = vec3.sub(vec3.create(), p2Wind, p1Wind);  // Tangent at t=1
+
+            // Calculate the normal as the cross product of the tangents
+            const normal = vec3.cross(vec3.create(), T0, T1);
+            vec3.normalize(normal, normal); // Normalize the normal
+            //AI GENERATED CODE SEGMENT ENDS HERE /////////////////////////////////////////////////////////////////////////////////////
+
+            const rightVec = vec3.normalize(vec3.create(), vec3.cross(vec3.create(), bladeDirection, vec3.fromValues(0, 1, 0)));
+            const leftVec = vec3.negate(vec3.create(), rightVec);
+
+            const taperFactor = (t) => bladeBaseWidth * (1 - t);
+
+            let p0Minus = vec3.add(vec3.create(), p0, vec3.scale(vec3.create(), leftVec, taperFactor(0)));
+            let p0Plus = vec3.add(vec3.create(), p0, vec3.scale(vec3.create(), rightVec, taperFactor(0)));
+
+            let p1Minus = vec3.add(vec3.create(), p1Wind, vec3.scale(vec3.create(), leftVec, taperFactor(0.5)));
+            let p1Plus = vec3.add(vec3.create(), p1Wind, vec3.scale(vec3.create(), rightVec, taperFactor(0.5)));
+
+            let p2Minus = vec3.add(vec3.create(), p2Wind, vec3.scale(vec3.create(), leftVec, taperFactor(1)));
+            let p2Plus = vec3.add(vec3.create(), p2Wind, vec3.scale(vec3.create(), rightVec, taperFactor(1)));
+
+            return { p0Minus, p0Plus, p1Minus, p1Plus, p2Minus, p2Plus, normal };
+        }
+
+
+        // Generate the vertices for the grass blade
+        function grassGenerateVertices(bladePoints) 
+        {
+            const vertices = [];
+            const steps = 4;
+
+            for (let t = 0; t <= 1; t += 1 / (steps - 1)) {
+                let leftVertex = quadraticBezier(bladePoints.p0Minus, bladePoints.p1Minus, bladePoints.p2Minus, t);
+                let rightVertex = quadraticBezier(bladePoints.p0Plus, bladePoints.p1Plus, bladePoints.p2Plus, t);
+
+                vertices.push(leftVertex[0], leftVertex[1], leftVertex[2]);
+                vertices.push(rightVertex[0], rightVertex[1], rightVertex[2]);
+            }
+            return new Float32Array(vertices);
+        }
+
+        // Generate random offsets for multiple grass blades
+        function generateGrassOffsets(numBlades) 
+        {
+            const yOffset = 0;
+
+            for (let i = 0; i < numBlades; i++) 
+            {
+
+                const xOffset = (Math.random() * 2 - 1) * groundWidth / 2;
+                const zOffset = (Math.random() * 2 - 1) * groundDepth / 2;
+
+                instancePositions.set([xOffset, yOffset, zOffset], i * 3);
+            }
+            console.log(instancePositions);
+        }
+
+        function updateLighting()
+        {
+            lightPosition[0] = 5 * Math.sin(time * lightSpeed);
+        }
+
+        //AI GENERATED CODE SEGEMENT BEGINS HERE/////////////////////////////////////////////////////////////
+        function updateCameraMovement() 
+        {
+            // Track the camera's movement direction (forward, backward, etc.)
+            const forward = vec3.fromValues(
+                Math.cos(pitch) * Math.sin(yaw),  // X component
+                Math.sin(pitch),                  // Y component (up/down)
+                -Math.cos(pitch) * Math.cos(yaw) // Z component
+            );
+            
+            // Normalizing the movement vector
+            vec3.normalize(forward, forward);
+
+            const right = vec3.create();
+            vec3.cross(right, forward, cameraUp); // Calculate the right vector
+            vec3.normalize(right, right);
+
+            // Adjust movement speed based on keys
+            const movementSpeed = cameraSpeed;
+            const moveDirection = vec3.create();
+
+            if (keys['W']) vec3.add(moveDirection, moveDirection, vec3.scale(vec3.create(), forward, movementSpeed));
+            if (keys['S']) vec3.subtract(moveDirection, moveDirection, vec3.scale(vec3.create(), forward, movementSpeed));
+            if (keys['D']) vec3.add(moveDirection, moveDirection, vec3.scale(vec3.create(), right, movementSpeed));
+            if (keys['A']) vec3.subtract(moveDirection, moveDirection, vec3.scale(vec3.create(), right, movementSpeed));
+            if (keys['Q']) cameraEyePos[1] += movementSpeed;
+            if (keys['E']) cameraEyePos[1] -= movementSpeed;
+
+            vec3.add(cameraEyePos, cameraEyePos, moveDirection);
+
+            // Calculate how much the camera has moved since the last frame
+            const movementDelta = vec3.create();
+            vec3.subtract(movementDelta, cameraEyePos, previousCameraPosition);
+
+            // Update the camera view matrix
+            updateCamera();
+
+            // Update the previous camera position for the next frame
+            vec3.copy(previousCameraPosition, cameraEyePos);
+
+            return movementDelta;
+        }
+
+        // Update the camera's view matrix based on user input
+        function updateCamera()
+        {
+            const direction = vec3.fromValues(
+                Math.cos(pitch) * Math.sin(yaw),
+                Math.sin(pitch),
+                -(Math.cos(pitch) * Math.cos(yaw))
+            );
+
+            // Normalize direction
+            vec3.normalize(direction, direction);
+
+            // Compute look-at target
+            const target = vec3.create();
+            vec3.add(target, cameraEyePos, direction);
+
+            mat4.lookAt(viewMatrix, cameraEyePos, target, cameraUp);
+        }
+
+        async function loadTexture(url) 
+        {
+            const texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+
+            // Set texture parameters
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+            const img = new Image();
+            return new Promise((resolve, reject) => {
+                img.onload = () => {
+                    gl.bindTexture(gl.TEXTURE_2D, texture);
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+                    gl.generateMipmap(gl.TEXTURE_2D);
+                    resolve(texture);
+                };
+                img.onerror = reject;
+                img.src = url;
+            });
+        }
+        //AI GENERATED CODE SEGMENT ENDS//////////////////////////////////////////////////////
+
+        const canvas = document.getElementById("c");
+        canvas.width = innerWidth;
+        canvas.height = innerHeight;
+        const gl = canvas.getContext("webgl2");
+        gl.viewport(0, 0, canvas.width, canvas.height);
+
+        //Standard Clipping Frustum information
+        const zNear = 0.01;
+        const zFar = 1000;
+        const FOV = Math.PI / 2;
+        const aspectRatio = gl.canvas.width / gl.canvas.height;
+
+        const nearHeight = 2 * zNear * Math.tan(FOV / 2);
+        const nearWidth = nearHeight * aspectRatio;
+
+        const groundWidth = nearHeight * 500;
+        const groundDepth = groundWidth;
+
+        //Matrix Uniforms
+        const projMatrix = mat4.create();
+        const viewMatrix = mat4.create();
+        console.log(viewMatrix);
+
+        //Camera Set Up
+        let mouseDown = false;
+        let lastX = 0;
+        let lastY = 0;
+
+        let pitch = 0;
+        let yaw = 0;
+        const sensitivity = 0.001;
+        const cameraSpeed = 0.010;
+        let cameraMoveDirection = vec3.create();
+
+        const cameraUp = vec3.fromValues(0,1,0);
+        const cameraEyePos = vec3.fromValues(0, 1.2, 6);
+        const cameraInitalDirection = vec3.fromValues(0, 0, -1);
+
+        mat4.lookAt(viewMatrix, cameraEyePos, cameraInitalDirection, cameraUp);
+        mat4.perspective(projMatrix, FOV, aspectRatio, zNear, zFar);
+
+        let movementDelta;
+
+        gl.enable(gl.DEPTH_TEST);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+        // Load the texture for the soil
+        const soilTexture = await loadTexture('top-view-soil.jpg');
+
+        let previousCameraPosition = vec3.clone(cameraEyePos);
+
+        let keys = { 'W': false, 'A': false, 'S': false, 'D': false, 'Q': false, 'E': false };
+
+        window.addEventListener('keydown', (event) => 
+        {
+            if (event.key === 'w' || event.key === 'W') keys['W'] = true;
+            if (event.key === 'a' || event.key === 'A') keys['A'] = true;
+            if (event.key === 's' || event.key === 'S') keys['S'] = true;
+            if (event.key === 'd' || event.key === 'D') keys['D'] = true;
+            if (event.key === 'q' || event.key === 'Q') keys['Q'] = true;
+            if (event.key === 'e' || event.key === 'E') keys['E'] = true;
+        });
+
+        window.addEventListener('keyup', (event) => 
+        {
+            if (event.key === 'w' || event.key === 'W') keys['W'] = false;
+            if (event.key === 'a' || event.key === 'A') keys['A'] = false;
+            if (event.key === 's' || event.key === 'S') keys['S'] = false;
+            if (event.key === 'd' || event.key === 'D') keys['D'] = false;
+            if (event.key === 'q' || event.key === 'Q') keys['Q'] = false;
+            if (event.key === 'e' || event.key === 'E') keys['E'] = false;
+        });
+
+        canvas.addEventListener("mousedown", (event) => 
+        {
+            mouseDown = true;
+            lastX = event.clientX;
+            lastY = event.clientY;
+        });
+
+        canvas.addEventListener("mouseup", () => 
+        {
+            mouseDown = false;
+        });
+
+        canvas.addEventListener("mousemove", (event) => 
+        {
+            if (mouseDown) {
+                const deltaX = event.clientX - lastX;
+                const deltaY = event.clientY - lastY;
+
+                yaw += deltaX * sensitivity;
+                pitch -= deltaY * sensitivity;
+
+                pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+
+                lastX = event.clientX;
+                lastY = event.clientY;
+
+                updateCamera();
+            }
+        });
+
+        let time = 0;
+
+        //Light information
+        const lightColor = vec3.fromValues(1.0, 0.7, 0.4);
+        const lightSpeed = 0.5;
+        const lightIntensity = 1.0;
+        let lightPosition = vec3.fromValues(0.0, 1.0, 0.0);
+
+        // Ground Base Information (unchanged)
+        const groundVertices = new Float32Array([
+            -groundWidth / 2, 0, -groundDepth / 2,
+            groundWidth / 2, 0, -groundDepth / 2,
+            -groundWidth / 2, 0, groundDepth / 2,
+            groundWidth / 2, 0, groundDepth / 2
+        ]);
+
+        const groundIndices = new Uint16Array([
+            0, 1, 2,  1, 2, 3
+        ]);
+
+        const groundUV = new Float32Array([
+            0, 0,  // Bottom-left corner of the texture
+            1, 0,  // Bottom-right corner
+            0, 1,  // Top-left corner
+            1, 1   // Top-right corner
+        ]);
+
+        // Grass Properties
+        const numGrassBlades = 20000;
+        const instancePositions = new Float32Array(numGrassBlades * 3);
+        const bladeLeaning = 0.2;
+        const bladePosition = vec3.fromValues(0,0,0);
+        const bladeHeight = 0.9;
+        const bladeBaseWidth = 0.03;
+        const bladeDirection = vec3.fromValues(0, 0, 1);
+
+        generateGrassOffsets(numGrassBlades);
+
+        const bladeIndices = new Uint8Array([
+            0, 3, 2,    5, 4, 7,
+            1, 2, 3,    4, 5, 6,
+            2, 1, 4,    3, 6, 5
+        ]);
+
+        // Main Program Code
+        const groundRoutine = gl.createProgram();
+        const grassRoutine = gl.createProgram();
+
+        // Compile and Attach Shaders
+        const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+        const groundFragShader = gl.createShader(gl.FRAGMENT_SHADER);
+        const grassFragShader = gl.createShader(gl.FRAGMENT_SHADER);
+        const grassvertexShader = gl.createShader(gl.VERTEX_SHADER);
+
+        gl.shaderSource(vertexShader, vertShaderSource);
+        gl.shaderSource(grassvertexShader, grassvertShaderSource);
+        gl.shaderSource(groundFragShader, texturedFragShaderSource);
+        gl.shaderSource(grassFragShader, fragShaderSource);
+        gl.compileShader(vertexShader);
+        gl.compileShader(groundFragShader);
+        gl.compileShader(grassFragShader);
+        gl.compileShader(grassvertexShader);
+
+        gl.attachShader(groundRoutine, vertexShader);
+        gl.attachShader(groundRoutine, groundFragShader);
+
+        gl.attachShader(grassRoutine, grassvertexShader);
+        gl.attachShader(grassRoutine, grassFragShader);
+
+        gl.linkProgram(groundRoutine);
+        gl.linkProgram(grassRoutine);
+
+        function render()
+        {
+            time += 0.01;
+            updateLighting();
+            gl.useProgram(groundRoutine);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            gl.clearColor(0.2, 0.2, 0.2, 1.0);
+
+            const bladePoints = generateGrassPoints(bladePosition, bladeHeight, movementDelta, time);
+            const bladeVertices = grassGenerateVertices(bladePoints);
+            const bladeNormals = new Float32Array(numGrassBlades * 3);
+
+            for (let i = 0; i < numGrassBlades; i++) 
+            {
+                bladeNormals.set([bladePoints.normal[0], bladePoints.normal[1], bladePoints.normal[2]], i * 3);
+            }
+
+            // Set Uniforms for the ground
+            let uViewLocation = gl.getUniformLocation(groundRoutine, 'uView');
+            let uProjectionLocation = gl.getUniformLocation(groundRoutine, 'uProjection');
+            const uSamplerLocation = gl.getUniformLocation(groundRoutine, 'uSampler');
+
+            gl.uniformMatrix4fv(uViewLocation, false, viewMatrix);
+            gl.uniformMatrix4fv(uProjectionLocation, false, projMatrix);
+            gl.uniform1i(uSamplerLocation, 0);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, soilTexture);
+
+            // Set up buffers for the ground
+            let aPositionLocation = gl.getAttribLocation(groundRoutine, 'aPosition');
+            gl.enableVertexAttribArray(aPositionLocation);
+            const aTexCoordLocation = gl.getAttribLocation(groundRoutine, 'aTexCoord');
+            gl.enableVertexAttribArray(aTexCoordLocation);
+
+            let texCoordBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, groundUV, gl.STATIC_DRAW);
+            gl.vertexAttribPointer(aTexCoordLocation, 2, gl.FLOAT, false, 0, 0);
+
+            const groundBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, groundBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, groundVertices, gl.STATIC_DRAW);
+            gl.vertexAttribPointer(aPositionLocation, 3, gl.FLOAT, false, 3 * 4, 0);
+
+            const groundIndexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, groundIndexBuffer);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, groundIndices, gl.STATIC_DRAW);
+
+            // Draw the ground
+            gl.drawElements(gl.TRIANGLES, groundIndices.length, gl.UNSIGNED_SHORT, 0);
+
+            // Switch to grass program
+            gl.useProgram(grassRoutine);
+
+            // Set the grass shader uniforms
+            const uColorLocation = gl.getUniformLocation(grassRoutine, 'uColor');
+            gl.uniform4f(uColorLocation, 0.18, 0.24, 0.13, 1.0);  // Grass color
+            
+            const uLightPositionLocation = gl.getUniformLocation(grassRoutine, 'uLightPosition');
+            const uLightColorLocation = gl.getUniformLocation(grassRoutine, 'uLightColor');
+            const uLightIntensityLocation = gl.getUniformLocation(grassRoutine, 'uLightIntensity');
+            gl.uniform3fv(uLightColorLocation, lightColor);
+            gl.uniform1f(uLightIntensityLocation, lightIntensity);
+            gl.uniform3fv(uLightPositionLocation, lightPosition);
+
+
+            const uViewLocationGrass = gl.getUniformLocation(grassRoutine, 'uView');
+            const uProjectionLocationGrass = gl.getUniformLocation(grassRoutine, 'uProjection');
+
+            gl.uniformMatrix4fv(uViewLocationGrass, false, viewMatrix);
+            gl.uniformMatrix4fv(uProjectionLocationGrass, false, projMatrix);
+
+            // Vertex Attributes: aPosition, aTexCoord, aNormal, and aInstanceOffset
+            aPositionLocation = gl.getAttribLocation(grassRoutine, 'aPosition');
+            const grassBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, grassBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, bladeVertices, gl.STATIC_DRAW);
+            gl.enableVertexAttribArray(aPositionLocation);
+            gl.vertexAttribPointer(aPositionLocation, 3, gl.FLOAT, false, 3 * 4, 0);
+
+            const aInstanceOffsetLocation = gl.getAttribLocation(grassRoutine, 'aInstanceOffset');
+            const grassOffsetBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, grassOffsetBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, instancePositions, gl.STATIC_DRAW);
+            gl.enableVertexAttribArray(aInstanceOffsetLocation);
+            gl.vertexAttribPointer(aInstanceOffsetLocation, 3, gl.FLOAT, false, 3 * 4, 0);
+            gl.vertexAttribDivisor(aInstanceOffsetLocation, 1);
+
+            const normalBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, bladeNormals, gl.STATIC_DRAW);
+
+            const aNormalLocation = gl.getAttribLocation(grassRoutine, 'aNormal');
+            gl.enableVertexAttribArray(aNormalLocation);
+            gl.vertexAttribPointer(aNormalLocation, 3, gl.FLOAT, false, 3 * 4, 0);
+            gl.vertexAttribDivisor(aNormalLocation, 1);
+
+            const grassIndexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, grassIndexBuffer);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, bladeIndices, gl.STATIC_DRAW);
+
+            gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, bladeVertices.length / 3, numGrassBlades);
+        }
+
+        function animate()
+        {
+            movementDelta = updateCameraMovement();
+            render();
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
